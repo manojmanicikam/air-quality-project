@@ -1,23 +1,23 @@
 import { AlertItem, AqiMarker } from "@/types/aqi";
 
 export const cityCenter = {
-  lat: 13.0827,
-  lng: 80.2707,
+  lat: 12.9716,
+  lng: 77.5946,
 };
 
 export const aqiMarkers: AqiMarker[] = [
-  { id: "1", name: "T. Nagar", lat: 13.0418, lng: 80.2341, aqi: 62, level: "Moderate" },
-  { id: "2", name: "Anna Nagar", lat: 13.0849, lng: 80.2101, aqi: 48, level: "Good" },
-  { id: "3", name: "Adyar", lat: 13.0067, lng: 80.2573, aqi: 89, level: "Moderate" },
-  { id: "4", name: "Perungudi", lat: 12.9647, lng: 80.2446, aqi: 132, level: "Poor" },
-  { id: "5", name: "Guindy", lat: 13.0069, lng: 80.2206, aqi: 154, level: "Poor" },
+  { id: "1", name: "Indiranagar", lat: 12.9784, lng: 77.6408, aqi: 64, level: "Moderate" },
+  { id: "2", name: "Malleshwaram", lat: 13.0035, lng: 77.5706, aqi: 46, level: "Good" },
+  { id: "3", name: "Whitefield", lat: 12.9698, lng: 77.7499, aqi: 91, level: "Moderate" },
+  { id: "4", name: "Electronic City", lat: 12.8456, lng: 77.6603, aqi: 138, level: "Poor" },
+  { id: "5", name: "Yeshwanthpur", lat: 13.0285, lng: 77.5400, aqi: 152, level: "Poor" },
 ];
 
 export const alertsData: AlertItem[] = [
   {
     id: "a1",
-    title: "AQI Warning - North Chennai",
-    message: "AQI has crossed 150 near industrial corridors. Avoid outdoor activity.",
+    title: "AQI Warning - North Bengaluru",
+    message: "AQI has crossed 150 near industrial corridors. Avoid prolonged outdoor activity.",
     severity: "high",
     time: "5 min ago",
   },
@@ -31,7 +31,7 @@ export const alertsData: AlertItem[] = [
   {
     id: "a3",
     title: "Smoke/Fire Nearby",
-    message: "Localized smoke plume detected near Guindy. Route diversions enabled.",
+    message: "Localized smoke plume detected near Electronic City. Route diversions enabled.",
     severity: "high",
     time: "42 min ago",
   },
