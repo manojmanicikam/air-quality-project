@@ -9,6 +9,7 @@ const char* password = "305@EEECL";
 
 // ───────── MQTT ─────────
 const char* mqtt_server = "broker.hivemq.com";
+const char* topic = "arun/esp32/sensors";
 
 // ───────── DHT ─────────
 #define DHTPIN 23
@@ -44,7 +45,9 @@ void setup_wifi() {
     Serial.print(".");
   }
 
-  Serial.println("\nConnected!");
+  Serial.println("\nWiFi Connected!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
 }
 
 // ───────── MQTT RECONNECT ─────────
@@ -79,7 +82,9 @@ float getMQ8PPM() {
 void setup() {
   Serial.begin(115200);
   dht.begin();
+
   setup_wifi();
+
   client.setServer(mqtt_server, 1883);
 }
 
@@ -96,33 +101,43 @@ void loop() {
   float mq8_ppm = getMQ8PPM();
 
   if (isnan(temp) || isnan(hum)) {
-    Serial.println("DHT failed!");
+    Serial.println("DHT sensor failed!");
     return;
   }
 
-  // ───── DELTA CHECK ─────
-  bool sendData = false;
+  static unsigned long last_publish_time = 0;
+  unsigned long now = millis();
 
-  if (abs(temp - last_temp) > TEMP_DELTA) sendData = true;
-  if (abs(hum  - last_hum)  > HUM_DELTA)  sendData = true;
-  if (abs(mq8_ppm - last_ppm) > PPM_DELTA) sendData = true;
+  // ───── CHECK CHANGE ─────
+  bool changed = false;
 
-  if (sendData) {
-    char payload[100];
+  if (abs(temp - last_temp) > TEMP_DELTA) changed = true;
+  if (abs(hum  - last_hum)  > HUM_DELTA)  changed = true;
+  if (abs(mq8_ppm - last_ppm) > PPM_DELTA) changed = true;
+
+  // ───── FORCE PUBLISH EVERY 10 SEC ─────
+  bool forcePublish = (now - last_publish_time >= 10000);
+
+  if (changed || forcePublish) {
+
+    char payload[150];
+
     snprintf(payload, sizeof(payload),
              "{\"temp\":%.2f,\"hum\":%.2f,\"h2_ppm\":%.2f}",
              temp, hum, mq8_ppm);
 
-    client.publish("arun/esp32/sensors", payload);
+    client.publish(topic, payload);
 
-    Serial.println("Sent:");
+    Serial.println("Published:");
     Serial.println(payload);
 
-    // Update last sent values
+    // update last values
     last_temp = temp;
     last_hum  = hum;
     last_ppm  = mq8_ppm;
-  } 
+
+    last_publish_time = now;
+  }
 
   delay(2000);
 }
