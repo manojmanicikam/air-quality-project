@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import folium
+import math
+import random
 import time
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
@@ -14,12 +16,12 @@ from forecaster import AQIForecaster
 BROKER        = "broker.hivemq.com"
 PORT          = 1883
 TOPIC         = "arun/esp32/sensors"
-REFRESH_MS    = 5_000   # increased from 2s → 5s to reduce flicker
+REFRESH_MS    = 5_000
 FRESH_TIMEOUT = 10
 FORECAST_TTL  = 300
 
-SENSOR_LAT =  13.127879413345047
-SENSOR_LON =  77.58657587251105
+SENSOR_LAT = 13.127879413345047
+SENSOR_LON = 77.58657587251105
 
 # ─────────────────────────────────────────
 # PAGE CONFIG
@@ -40,7 +42,6 @@ html, body, [class*="css"] {
     background: #0b0f1a;
     color: #e2e8f0;
 }
-
 div[data-testid="metric-container"] {
     background: #131929;
     border: 1px solid #1e293b;
@@ -58,7 +59,6 @@ div[data-testid="metric-container"] div[data-testid="stMetricValue"] {
     font-size: 1.6rem !important;
     color: #f1f5f9 !important;
 }
-
 .forecast-card {
     background: #131929;
     border: 1px solid #1e293b;
@@ -75,11 +75,7 @@ div[data-testid="metric-container"] div[data-testid="stMetricValue"] {
     margin-bottom: 6px;
     letter-spacing: .08em;
 }
-.forecast-time {
-    font-size: 0.82rem;
-    color: #94a3b8;
-    margin-bottom: 10px;
-}
+.forecast-time { font-size: 0.82rem; color: #94a3b8; margin-bottom: 10px; }
 .forecast-aqi {
     font-family: 'Space Mono', monospace;
     font-size: 2rem;
@@ -87,11 +83,7 @@ div[data-testid="metric-container"] div[data-testid="stMetricValue"] {
     line-height: 1;
     margin-bottom: 4px;
 }
-.forecast-ppm {
-    font-size: 0.78rem;
-    color: #64748b;
-    margin-bottom: 8px;
-}
+.forecast-ppm  { font-size: 0.78rem; color: #64748b; margin-bottom: 8px; }
 .forecast-badge {
     display: inline-block;
     padding: 3px 10px;
@@ -110,19 +102,18 @@ div[data-testid="metric-container"] div[data-testid="stMetricValue"] {
     font-weight: 600;
     margin-bottom: 8px;
 }
-.pill-live    { background: #052e16; color: #4ade80; border: 1px solid #16a34a; }
-.pill-stale   { background: #1c1608; color: #facc15; border: 1px solid #ca8a04; }
-.pill-offline { background: #1c0808; color: #f87171; border: 1px solid #dc2626; }
-
+.pill-live    { background:#052e16; color:#4ade80; border:1px solid #16a34a; }
+.pill-stale   { background:#1c1608; color:#facc15; border:1px solid #ca8a04; }
+.pill-offline { background:#1c0808; color:#f87171; border:1px solid #dc2626; }
 h1, h2, h3 { font-family: 'Space Mono', monospace !important; }
-
-/* Hide the streamlit rerun flash */
-div[data-testid="stStatusWidget"] { display: none; }
+.legend-row { display:flex; align-items:center; gap:8px; font-size:0.78rem; margin-bottom:5px; }
+.legend-dot { width:13px; height:13px; border-radius:50%; flex-shrink:0; }
+div[data-testid="stStatusWidget"] { display:none; }
 </style>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────
-# INIT MQTT & FORECASTER (once per session)
+# INIT MQTT & FORECASTER
 # ─────────────────────────────────────────
 if "mqtt" not in st.session_state:
     receiver = MQTTReceiver(BROKER, PORT, TOPIC)
@@ -184,62 +175,168 @@ def render_forecast_card(entry: dict) -> str:
         </div>
     </div>"""
 
-# ── Build map ONCE and cache it — never rebuilt on refresh ──
+# ─────────────────────────────────────────
+# AQI ZONE SEEDER  (fixed seed → stable positions)
+# ─────────────────────────────────────────
+def _seed_aqi_zones(n: int = 28, seed: int = 77) -> list[dict]:
+    """
+    Scatter n AQI zones within ~1.5 km of the sensor.
+    Distribution: Good 40%, Moderate 25%, Sensitive 15%,
+                  Unhealthy 10%, Very Unhealthy 7%, Hazardous 3%
+    """
+    rng = random.Random(seed)
+    buckets = (
+        [(0,   50)] * 11 +
+        [(51, 100)] * 7  +
+        [(101,150)] * 4  +
+        [(151,200)] * 3  +
+        [(201,300)] * 2  +
+        [(301,400)] * 1
+    )
+    rng.shuffle(buckets)
+    zones = []
+    for lo, hi in buckets[:n]:
+        angle  = rng.uniform(0, 2 * math.pi)
+        radius = rng.uniform(120, 1400)          # metres from sensor
+        dlat   = (radius * math.cos(angle)) / 111_320
+        dlon   = (radius * math.sin(angle)) / (
+                    111_320 * math.cos(math.radians(SENSOR_LAT)))
+        aqi    = rng.randint(lo, hi)
+        zones.append({
+            "lat":    SENSOR_LAT + dlat,
+            "lon":    SENSOR_LON + dlon,
+            "aqi":    aqi,
+            "radius": rng.randint(7, 18),        # folium circle px radius
+        })
+    return zones
+
+# ─────────────────────────────────────────
+# MAP BUILDER  (cached — rebuilt only when live AQI changes)
+# ─────────────────────────────────────────
 @st.cache_resource
-def build_map() -> folium.Map:
+def build_map(live_aqi: int | None = None) -> folium.Map:
     m = folium.Map(
         location=[SENSOR_LAT, SENSOR_LON],
         zoom_start=15,
         tiles="CartoDB dark_matter",
     )
+
+    # ── Draw seeded AQI zones ─────────────────────────────
+    for z in _seed_aqi_zones():
+        label    = aqi_label(z["aqi"])
+        fg, _    = aqi_colors(label)
+        folium.CircleMarker(
+            location=[z["lat"], z["lon"]],
+            radius=z["radius"],
+            color=fg,
+            fill=True,
+            fill_color=fg,
+            fill_opacity=0.30,
+            weight=1.2,
+            tooltip=f'AQI {z["aqi"]} — {label}',
+            popup=folium.Popup(
+                f'<div style="font-family:sans-serif;text-align:center;padding:4px 8px">'
+                f'<span style="font-size:1.2rem;font-weight:700;color:{fg}">'
+                f'AQI {z["aqi"]}</span><br>'
+                f'<span style="color:#555;font-size:.8rem">{label}</span></div>',
+                max_width=160,
+            ),
+        ).add_to(m)
+
+    # ── Sensor origin marker ──────────────────────────────
+    origin_aqi = live_aqi or 25
+    o_label    = aqi_label(origin_aqi)
+    o_fg, _    = aqi_colors(o_label)
+
+    # Pulsing ring around sensor
     folium.CircleMarker(
         location=[SENSOR_LAT, SENSOR_LON],
-        radius=60,
-        color="#38bdf8",
+        radius=22,
+        color=o_fg,
         fill=True,
-        fill_color="#38bdf8",
-        fill_opacity=0.08,
-        weight=1.5,
-        tooltip="Sensor influence area",
+        fill_color=o_fg,
+        fill_opacity=0.12,
+        weight=2,
     ).add_to(m)
+
     folium.Marker(
         location=[SENSOR_LAT, SENSOR_LON],
+        tooltip="📍 I'm here",
         popup=folium.Popup(
-            f"""
-            <div style="font-family:sans-serif;text-align:center;min-width:150px">
-                <b>📍 Sensor Location</b><br>
-                <span style="font-size:0.72rem;color:#888">
-                    {SENSOR_LAT:.6f}, {SENSOR_LON:.6f}
-                </span>
-            </div>
-            """,
+            f'<div style="font-family:sans-serif;text-align:center;min-width:150px">'
+            f'<b>📍 Sensor Location</b><br>'
+            f'<span style="font-size:1rem;font-weight:700;color:{o_fg}">'
+            f'AQI {origin_aqi}</span><br>'
+            f'<span style="color:#555;font-size:.8rem">{o_label}</span><br>'
+            f'<hr style="margin:5px 0">'
+            f'<span style="font-size:.7rem;color:#aaa">'
+            f'{SENSOR_LAT:.6f}, {SENSOR_LON:.6f}</span></div>',
             max_width=200,
         ),
-        tooltip="📍 I'm here",
-        icon=folium.Icon(color="red", icon_color="white", icon="map-marker", prefix="fa"),
+        icon=folium.Icon(
+            color="red",
+            icon_color="white",
+            icon="map-marker",
+            prefix="fa",
+        ),
     ).add_to(m)
+
     return m
 
 # ─────────────────────────────────────────
-# STATIC SECTIONS (render once, no flicker)
+# STATIC HEADER
 # ─────────────────────────────────────────
 st.markdown("## 🌍 AQI Monitoring")
 st.markdown("---")
 
-# ── Map (static — never re-renders on refresh) ────────────
-st.markdown("### 📍 Sensor Location")
-st_folium(
-    build_map(),
-    width="100%",
-    height=380,
-    returned_objects=[],   # critical: prevents map interaction from triggering rerun
-    key="sensor_map",      # stable key prevents iframe remount
-)
+# ─────────────────────────────────────────
+# MAP + LEGEND
+# ─────────────────────────────────────────
+st.markdown("### 🗺️ Live AQI Map")
+
+map_col, legend_col = st.columns([5, 1])
+
+with legend_col:
+    st.markdown("**AQI Levels**")
+    for label, (fg, _) in AQI_PALETTE.items():
+        st.markdown(
+            f'<div class="legend-row">'
+            f'<div class="legend-dot" style="background:{fg}"></div>'
+            f'<span>{label}</span></div>',
+            unsafe_allow_html=True,
+        )
+    st.markdown(
+        '<div style="margin-top:12px;font-size:0.72rem;color:#475569;line-height:1.7">'
+        '🔴 Red pin = your sensor<br>'
+        '⚪ Circles = nearby AQI zones<br>'
+        'Click a circle for details'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+with map_col:
+    _data     = receiver.get_data()
+    _live_aqi = _data["aqi"] if _data else None
+
+    # Only invalidate cache when live AQI value actually changes
+    _map_key = f"map_{_live_aqi}"
+    if st.session_state.get("_map_cache_key") != _map_key:
+        st.session_state["_map_cache_key"] = _map_key
+        # Clear st.cache_resource so build_map() rebuilds with new live_aqi
+        build_map.clear()
+
+    st_folium(
+        build_map(live_aqi=_live_aqi),
+        width="100%",
+        height=460,
+        returned_objects=[],
+        key="sensor_map",
+    )
+
 st.markdown("---")
 
 # ─────────────────────────────────────────
-# LIVE FRAGMENT — only this section reruns
-# every 5 s, map above is untouched
+# LIVE FRAGMENT
 # ─────────────────────────────────────────
 @st.fragment(run_every=REFRESH_MS / 1000)
 def live_panel():
@@ -248,7 +345,7 @@ def live_panel():
     connected = receiver.is_connected()
     age       = receiver.seconds_since_last_message()
 
-    # ── Connection pill ───────────────────────────────────
+    # Connection pill
     if connected and fresh:
         pill_cls, dot, status_text = "pill-live",    "●", "Live · receiving data"
     elif connected:
@@ -266,7 +363,7 @@ def live_panel():
     if mqtt_error:
         st.warning(f"⚠️ MQTT error: `{mqtt_error}`")
 
-    # ── Metrics ───────────────────────────────────────────
+    # Metrics
     st.markdown("### 📊 Current Readings")
     if data:
         c1, c2, c3, c4 = st.columns(4)
@@ -289,9 +386,8 @@ def live_panel():
 
     st.markdown("---")
 
-    # ── Forecast ──────────────────────────────────────────
+    # Forecast
     st.markdown("### 🔮 LSTM Forecast — Next 3 Hours")
-
     if not st.session_state.get("forecaster_ok", False):
         st.warning(
             f"⚠️ Model not loaded: `{st.session_state.get('forecaster_err', 'unknown error')}`  \n"
@@ -323,7 +419,6 @@ def live_panel():
 
         if all_6h:
             next_3h = all_6h[:3]
-
             cols = st.columns(3)
             for col, entry in zip(cols, next_3h):
                 with col:
@@ -353,18 +448,16 @@ def live_panel():
 
     st.markdown("---")
 
-    # ── History charts ────────────────────────────────────
+    # History
     history = receiver.get_data_history()
     if len(history) >= 2:
         st.markdown("### 📈 Sensor History (last 50 readings)")
         df = pd.DataFrame(history)
         df["time"] = pd.to_datetime(df["timestamp"], unit="s").dt.strftime("%H:%M:%S")
         df = df.set_index("time")
-
         tab1, tab2, tab3 = st.tabs(["AQI", "NO₂ ppm", "Temp & Humidity"])
         with tab1: st.line_chart(df[["aqi"]])
         with tab2: st.line_chart(df[["no2"]])
         with tab3: st.line_chart(df[["temp", "hum"]])
 
-# ── Run the live fragment ─────────────────
 live_panel()
